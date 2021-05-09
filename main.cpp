@@ -18,6 +18,10 @@
 
 #include "mbed_rpc.h"
 #include "uLCD_4DGL.h"
+#include <string.h>
+#include <math.h>
+
+#define PI 3.14159265
 
 
 using namespace std::chrono;
@@ -38,7 +42,12 @@ uLCD_4DGL uLCD(D1, D0, D2); // serial tx, serial rx, reset pin;
 
 void GestureUI_START(Arguments *in, Reply *out);
 RPCFunction rpcGestureUI(&GestureUI_START, "GestureUI_START");
+
+void Tilt_Angle_Detection_START(Arguments *in, Reply *out);
+RPCFunction rpcTiltAngleDetection(&Tilt_Angle_Detection_START, "Tilt_Angle_Detection_START");
+
 Thread GestureUI_thread;
+Thread Tilt_Angle_Detection_thread;
 BufferedSerial pc(USBTX, USBRX);
 
 
@@ -46,6 +55,11 @@ constexpr int kTensorArenaSize = 60 * 1024;
 uint8_t tensor_arena[kTensorArenaSize];
 // Return the result of the last prediction
 
+Thread Client_thread;
+Config config;
+
+bool MODE = 0;
+MQTT::Client<MQTTNetwork, Countdown>* client_out;
 
 
 int PredictGesture(float* output) {
@@ -112,7 +126,8 @@ void publish_confirm_angle_message(MQTT::Client<MQTTNetwork, Countdown>* client)
     message.dup = false;
     message.payload = (void*) buff;
     message.payloadlen = strlen(buff) + 1;
-    int rc = client->publish("confirm_angle", message);
+    char angle_topic[] = "confirm_angle";
+    int rc = client->publish(angle_topic, message);
 
     printf("rc:  %d\r\n", rc);
     printf("Puslish message: %s\r\n", buff);
@@ -125,6 +140,14 @@ int GestureUI() {
 
     // The gesture index of the prediction
     int gesture_index;
+    config.seq_length = 64;
+    config.consecutiveInferenceThresholds[0] = 30;
+    config.consecutiveInferenceThresholds[1] = 5;
+    config.consecutiveInferenceThresholds[2] = 30;
+
+    config.output_message[0] = "calss0";
+    config.output_message[1] = "calss1";
+    config.output_message[2] = "calss2";
 
     // Set up logging.
     static tflite::MicroErrorReporter micro_error_reporter;
@@ -191,6 +214,11 @@ int GestureUI() {
     error_reporter->Report("Set up successful...\n");
 
     while (true) {
+        if (MODE)
+        {
+            return 0;
+        }
+        
 
         // Attempt to read new data from the accelerometer
         got_data = ReadAccelerometer(error_reporter, model_input->data.f,
@@ -236,10 +264,70 @@ int GestureUI() {
 void GestureUI_START(Arguments *in, Reply *out) {
     GestureUI_thread.start(GestureUI);
 }
-void GestureUI_STOP() {
-    GestureUI_thread.join();
+
+// void GestureUI_STOP() {
+//     GestureUI_thread.join();
+// }
+void publish_message() {
+    message_num++;
+    MQTT::Message message;
+    char buff[200];
+    // int16_t pDataXYZ[3] = {0};
+    // BSP_ACCELERO_AccGetXYZ(pDataXYZ);
+    sprintf(buff, "Over_selected_angle");
+//     sprintf(buff, "QoS0 Hello, Python! #%d", message_num);
+    message.qos = MQTT::QOS0;
+    message.retained = false;
+    message.dup = false;
+    message.payload = (void*) buff;
+    message.payloadlen = strlen(buff) + 1;
+    int rc = client_out->publish("over", message);
+
+    printf("rc:  %d\r\n", rc);
+    printf("Puslish message: %s\r\n", buff);
 }
 
+void Tilt_Angle_Detection() {
+    uLCD.cls();
+    uLCD.printf("initialization...");
+    ThisThread::sleep_for(1000ms);
+    BSP_ACCELERO_Init();
+    int16_t pDataXYZ[3] = {0};
+    int16_t initXYZ[3] = {0};
+    double x, y, z;
+    double ret = 1;
+    BSP_ACCELERO_AccGetXYZ(initXYZ);
+    double g = 1.0 * initXYZ[2];
+    double out;
+    while (true)
+    {
+        if(!MODE) {
+            return;
+        }
+        BSP_ACCELERO_AccGetXYZ(pDataXYZ);
+        x = 1.0*pDataXYZ[0];
+        y = 1.0*pDataXYZ[1];
+        z = 1.0*pDataXYZ[2];
+        ret = z/g;
+        out = acos(ret) * 180 / PI;
+        uLCD.cls();
+        uLCD.printf("%f\n", x);
+        uLCD.printf("%f\n", y);
+        uLCD.printf("%f\n", z);
+        uLCD.printf("%f\n", out);
+        if(out >= angle) {
+           publish_message();
+        }
+        ThisThread::sleep_for(1000ms);
+    }    
+}
+
+void Tilt_Angle_Detection_START(Arguments *in, Reply *out) {
+    Tilt_Angle_Detection_thread.start(Tilt_Angle_Detection);
+}
+
+char GestureUI_STOP_MESSAGE[] = "GestureUI_STOP";
+char Tilt_Angle_Detection_STOP_MESSAGE[] = "Tilt_Angle_Detection_STOP";
 void messageArrived(MQTT::MessageData& md) {
     MQTT::Message &message = md.message;
     char msg[300];
@@ -247,41 +335,35 @@ void messageArrived(MQTT::MessageData& md) {
     printf(msg);
     ThisThread::sleep_for(1000ms);
     char payload[300];
-    sprintf(payload, "Payload %.*s\r\n", message.payloadlen, (char*)message.payload);
+    sprintf(payload, "%.*s\r\n", message.payloadlen, (char*)message.payload);
     printf(payload);
-    // if(payload == "GestureUI_STOP") {
-    //     printf("GestureUI_STOP terminated");
-    //     GestureUI_STOP();
+    // for(int i = 0; i < 14; i++) {
+    //     printf("%c %c\n", payload[i], GestureUI_STOP_MESSAGE[i]);
     // }
+    // int ret = strncmp(payload, GestureUI_STOP_MESSAGE, 14);
+    // printf("%d", ret);
+    if(!strncmp(payload, GestureUI_STOP_MESSAGE, 14)) {
+        // GestureUI_STOP();
+        MODE = 1;
+        uLCD.cls();
+        uLCD.text_width(4); //4X size text
+        uLCD.text_height(4);
+        uLCD.printf("%2d\n",55);
+        printf("GestureUI terminated");
+    } else if(!strncmp(payload, Tilt_Angle_Detection_STOP_MESSAGE, 20)) {
+        MODE = 0;
+    }
     ++arrivedcount;
 }
 
-void publish_message(MQTT::Client<MQTTNetwork, Countdown>* client) {
-    message_num++;
-    MQTT::Message message;
-    char buff[200];
-    int16_t pDataXYZ[3] = {0};
-    BSP_ACCELERO_AccGetXYZ(pDataXYZ);
-    sprintf(buff, "Accelerometer values: (%d, %d, %d)", pDataXYZ[0], pDataXYZ[1], pDataXYZ[2]);
-//     sprintf(buff, "QoS0 Hello, Python! #%d", message_num);
-    message.qos = MQTT::QOS0;
-    message.retained = false;
-    message.dup = false;
-    message.payload = (void*) buff;
-    message.payloadlen = strlen(buff) + 1;
-    int rc = client->publish(topic, message);
-
-    printf("rc:  %d\r\n", rc);
-    printf("Puslish message: %s\r\n", buff);
-}
 
 
 void close_mqtt() {
     closed = true;
 }
 
-int main() {
-   wifi = WiFiInterface::get_default_instance();
+int MQTT_THREAD() {
+    wifi = WiFiInterface::get_default_instance();
     if (!wifi) {
             printf("ERROR: No WiFiInterface found.\r\n");
             return -1;
@@ -299,7 +381,7 @@ int main() {
     NetworkInterface* net = wifi;
     MQTTNetwork mqttNetwork(net);
     MQTT::Client<MQTTNetwork, Countdown> client(mqttNetwork);
-
+    client_out = &client;
     //TODO: revise host to your IP
     const char* host = "192.168.43.214";
     printf("Connecting to TCP network...\r\n");
@@ -327,17 +409,38 @@ int main() {
     if (client.subscribe(topic, MQTT::QOS0, messageArrived) != 0){
             printf("Fail to subscribe\r\n");
     }
-    BSP_ACCELERO_Init();
     mqtt_thread.start(callback(&mqtt_queue, &EventQueue::dispatch_forever));
     btn2.rise(mqtt_queue.event(&publish_confirm_angle_message, &client));
-//     btn2.rise(mqtt_queue.event(&publish_message, &client));
-//     ACC_Ticker.attach(mqtt_queue.event(&publish_message, &client), 1s);
-    //btn3.rise(&close_mqtt);
-    char buf[256], outbuf[256];
+    int num = 0;
+    while (num != 5) {
+            client.yield(100);
+            ++num;
+    }
+    while (1) {
+        if (closed) break;
+        client.yield(500);
+        ThisThread::sleep_for(500ms);
+    }
+    printf("Ready to close MQTT Network......\n");
 
+    if ((rc = client.unsubscribe(topic)) != 0) {
+            printf("Failed: rc from unsubscribe was %d\n", rc);
+    }
+    if ((rc = client.disconnect()) != 0) {
+    printf("Failed: rc from disconnect was %d\n", rc);
+    }
+
+    mqttNetwork.disconnect();
+    printf("Successfully closed!\n");
+    return 0;
+}
+
+int main() {
+    char buf[256], outbuf[256];
     FILE *devin = fdopen(&pc, "r");
     FILE *devout = fdopen(&pc, "w");
-
+    Client_thread.start(MQTT_THREAD);  
+    MODE = 0; 
     while(1) {
         memset(buf, 0, 256);
         for (int i = 0; ; i++) {
@@ -352,30 +455,5 @@ int main() {
         RPC::call(buf, outbuf);
         printf("%s\r\n", outbuf);
     }
-
-    int num = 0;
-    while (num != 5) {
-            client.yield(100);
-            ++num;
-    }
-
-    while (1) {
-            if (closed) break;
-            client.yield(500);
-            ThisThread::sleep_for(500ms);
-    }
-
-    printf("Ready to close MQTT Network......\n");
-
-    if ((rc = client.unsubscribe(topic)) != 0) {
-            printf("Failed: rc from unsubscribe was %d\n", rc);
-    }
-    if ((rc = client.disconnect()) != 0) {
-    printf("Failed: rc from disconnect was %d\n", rc);
-    }
-
-    mqttNetwork.disconnect();
-    printf("Successfully closed!\n");
-
     return 0;
 }
