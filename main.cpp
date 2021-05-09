@@ -36,6 +36,10 @@ volatile bool closed = false;
 
 const char* topic = "Mbed";
 
+DigitalOut myled1(LED1);
+DigitalOut myled2(LED2);
+DigitalOut myled3(LED3);
+
 Thread mqtt_thread(osPriorityHigh);
 EventQueue mqtt_queue;
 uLCD_4DGL uLCD(D1, D0, D2); // serial tx, serial rx, reset pin;
@@ -141,14 +145,15 @@ int GestureUI() {
     // The gesture index of the prediction
     int gesture_index;
     config.seq_length = 64;
-    config.consecutiveInferenceThresholds[0] = 30;
-    config.consecutiveInferenceThresholds[1] = 5;
+    config.consecutiveInferenceThresholds[0] = 20;
+    config.consecutiveInferenceThresholds[1] = 10;
     config.consecutiveInferenceThresholds[2] = 30;
 
     config.output_message[0] = "calss0";
     config.output_message[1] = "calss1";
     config.output_message[2] = "calss2";
 
+    myled1.write(1);
     // Set up logging.
     static tflite::MicroErrorReporter micro_error_reporter;
     tflite::ErrorReporter* error_reporter = &micro_error_reporter;
@@ -216,6 +221,7 @@ int GestureUI() {
     while (true) {
         if (MODE)
         {
+            myled1.write(0);
             return 0;
         }
         
@@ -288,6 +294,7 @@ void publish_message() {
 }
 
 void Tilt_Angle_Detection() {
+    myled2.write(1);
     uLCD.cls();
     uLCD.printf("initialization...");
     ThisThread::sleep_for(1000ms);
@@ -299,9 +306,12 @@ void Tilt_Angle_Detection() {
     BSP_ACCELERO_AccGetXYZ(initXYZ);
     double g = 1.0 * initXYZ[2];
     double out;
+    myled2.write(0);
     while (true)
     {
+        myled3.write(1);
         if(!MODE) {
+            myled3.write(0);
             return;
         }
         BSP_ACCELERO_AccGetXYZ(pDataXYZ);
@@ -311,9 +321,11 @@ void Tilt_Angle_Detection() {
         ret = z/g;
         out = acos(ret) * 180 / PI;
         uLCD.cls();
-        uLCD.printf("%f\n", x);
-        uLCD.printf("%f\n", y);
-        uLCD.printf("%f\n", z);
+        // uLCD.printf("%f\n", x);
+        // uLCD.printf("%f\n", y);
+        // uLCD.printf("%f\n", z);
+        uLCD.text_width(4); //4X size text
+        uLCD.text_height(4);
         uLCD.printf("%f\n", out);
         if(out >= angle) {
            publish_message();
@@ -345,10 +357,6 @@ void messageArrived(MQTT::MessageData& md) {
     if(!strncmp(payload, GestureUI_STOP_MESSAGE, 14)) {
         // GestureUI_STOP();
         MODE = 1;
-        uLCD.cls();
-        uLCD.text_width(4); //4X size text
-        uLCD.text_height(4);
-        uLCD.printf("%2d\n",55);
         printf("GestureUI terminated");
     } else if(!strncmp(payload, Tilt_Angle_Detection_STOP_MESSAGE, 20)) {
         MODE = 0;
